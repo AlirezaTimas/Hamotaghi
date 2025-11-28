@@ -1,0 +1,613 @@
+# Rule — PART A
+
+## پروژه: هم‌اتاقی — Rule کامل (PART A)
+
+**هدف:** این فایل بخشی اول از دو فایل است که شامل: مقدمه، الزامات، سناریوهای کامل ورود تا خروج برای هر دو نقش، معماری کلی مبتنی بر PHP (Laravel) و MySQL، ماژول‌ها، دیتابیس و مسیرهای API به‌صورت دقیق و آمادهٔ اجرای Cursor است. برای رعایت محدودیت طول، فایل دوم (Part B) شامل پیاده‌سازی فنی دقیق‌تر، اینترفیس‌ها، کلاس‌ها، متدها، نمونه‌کدها، الگوریتم Matching، GitHub integration و قوانین اجباری Cursor خواهد بود.
+
+---
+
+### 1) مقدمه و الزامات کلی
+
+* این Rule مرجع نهایی Cursor برای عملیات ریدیزاین کد در `public_html` repository شما است.
+* تکنولوژی پایه: **PHP** (Laravel توصیه شده) و **MySQL**.
+* Storage محلی: `public_html/storage` و `public_html/uploads` برای فایل‌ها و تصاویر.
+* Cursor **نباید** پروژه را از صفر بسازد؛ وظیفهٔ Cursor بازخوانی سورس موجود در `public_html`، ریدیزاین ساختار طبق این Rule و ایجاد تغییرات به‌صورت branch+PR است.
+
+**پیش‌نیازها برای Cursor:**
+
+* GitHub personal access token (repo scope) یا service account
+* اطلاعات کانفیگ برای deploy (در صورت نیاز): SSH access یا GitHub Actions permission
+* لیست فایل‌ها و ساختار فعلی `public_html` باید در README ریپازیتوری مشخص شده باشد.
+
+---
+
+### 2) سناریوهای کامل — User Journey (ورود تا خروج)
+
+هر سناریو با گام‌های دقیق، APIهای لازم و تغییرات وضعیت (state changes) ذکر می‌شود.
+
+#### 2.1 سناریوی هم‌خانه (Roommate)
+
+**گام 0 — Landing**
+
+* Check: اگر `session` فعال یا Laravel Sanctum token موجود است، درخواست `GET /api/v1/user/me` می‌شود.
+* اگر مجاز نبود: نمایش صفحه عمومی با دکمه‌های Login/Signup.
+
+**گام 1 — Signup / Login**
+
+* Endpoint: `POST /api/v1/auth/signup` یا `POST /api/v1/auth/login`.
+* Signup:
+
+  * ورودی: `{ email?, phone?, password }`.
+  * Server: create user with `first_login = true` و return `access_token` و `refresh_token`.
+* Login:
+
+  * ورودی: `{ emailOrPhone, password }`.
+  * خروجی: `access_token`, `refresh_token`, `first_login` flag.
+
+**گام 2 — First Login Flow**
+
+* شرط: `first_login == true` یا `profile.completed == false`.
+* مسیرها و فرم‌ها:
+
+  * انتخاب نقش: `role = roommate`.
+  * انتخاب جنسیت: `gender = male | female`.
+  * تست شخصیت: `POST /api/v1/personality/test` (answers array) -> returns personality_score.
+  * تکمیل پروفایل: `PATCH /api/v1/profile` -> required fields.
+* Server validations: age >= 18, budget ranges, image file types etc.
+* سرانجام: set `profile.completed = true`, `users.first_login = false`.
+
+**گام 3 — Dashboard و Recommendations**
+
+* Endpoint: `GET /api/v1/match/recommendations`.
+* Server: MatchingService محاسبه می‌کند (می‌تواند از cache استفاده کند).
+* نمایش: list of recommended listings with `match_percentage` و `short_profile`.
+
+**گام 4 — بازدید آگهی و پروفایل**
+
+* Endpoint: `GET /api/v1/listings/{id}` و `GET /api/v1/user/{id}/public`.
+* Log: ارسال event به `POST /api/v1/analytics/event` که شامل `{ event: 'view_listing', user_id, listing_id }` است.
+
+**گام 5 — ارسال درخواست (Send Request)**
+
+* Endpoint: `POST /api/v1/match/send` body: `{ listing_id, message? }`.
+* Server: ایجاد رکورد در جدول `matches` با وضعیت `pending`, محاسبه `match_percentage`, notify owner.
+
+**گام 6 — چت و تعامل**
+
+* در صورت accept/reply، یک room ساخته می‌شود: `rooms` table.
+* Chat endpoints: `GET /api/v1/chat/room/{id}`, `POST /api/v1/chat/room/{id}/send`.
+* Real-time: Laravel Echo/Pusher یا polling fallback.
+
+**گام 7 — پذیرش نهایی (Accept)**
+
+* Endpoint: `POST /api/v1/match/{id}/accept`.
+* عمل: status = `accepted`, create `acknowledgement` record (هر دو طرف تیک بزنند)، publish event `match.accepted`.
+
+**گام 8 — خروج (Logout)**
+
+* Endpoint: `POST /api/v1/auth/logout`.
+* عمل: destroy session / blacklist token, log event `logout`.
+
+#### 2.2 سناریوی صاحب‌خانه (Owner)
+
+مراحل مشابه هم‌خانه است با تفاوت‌های زیر:
+
+* پس از First Login، owner قادر به ایجاد آگهی است: `POST /api/v1/listings` با فیلدهای کامل.
+* owner پنل مدیریتی برای درخواست‌ها: `GET /api/v1/owner/requests`.
+* قوانین جنسیت و filtering به‌صورت server-side اعمال می‌شوند.
+* owner می‌تواند listing را archive یا delete کند: `PATCH /api/v1/listings/{id}/status`.
+
+---
+
+### 3) معماری کلی — Clean Architecture پیاده‌شده در Laravel
+
+**لایه‌ها و مسیرها در ساختار پروژه:**
+
+* `app/Domain/` — Entities (User, Profile, Listing, Match, PersonalityScore, Message, Room)
+* `app/Repositories/` — Eloquent-based Repositories (UserRepository, ListingRepository,...)
+* `app/Services/` — Business services (MatchingService, PersonalityService, ChatService)
+* `app/Http/Controllers/Api/V1/` — API Controllers
+* `app/Http/Requests/` — FormRequest validation classes
+* `app/Events/` و `app/Listeners/` — Events system
+* `app/Jobs/` — queued jobs (SendNotificationJob, RecomputeRecommendationsJob)
+* `routes/api.php` — define API v1 routes
+* `database/migrations/` — migrations
+* `database/seeders/` — seeders
+
+**Dependency Rule:**
+
+* Presentation -> Application -> Domain -> Infrastructure
+* Domain نباید به Laravel-specific code وابسته باشد؛ services و repository interfaces باید در Domain تعریف شوند و implementationها در Repositories قرار گیرند.
+
+---
+
+### 4) ماژول‌ها و مسئولیت‌ها
+
+* **Auth Module:** Signup, Login, OTP, Token management (Sanctum/JWT), logout.
+* **User Module:** basic user CRUD, role change (با محدودیت)، profile fetch.
+* **Profile Module:** completeProfile, updateProfile, publicProfile.
+* **Personality Module:** personality test, score calculation.
+* **Listing Module:** create/read/update/delete/search listings.
+* **Matching Module:** compute recommendations, sendRequest, accept/reject.
+* **Chat Module:** rooms and messages, real-time or polling.
+* **Notification Module:** queue-based email/SMS/push.
+* **Analytics Module:** record events.
+* **Admin Module:** suspend users, moderate listings.
+
+هر ماژول به‌صورت PSR-4 autoloaded namespace در Laravel تعریف شود، مثلاً `App\Services\MatchingService`.
+
+---
+
+### 5) دیتابیس (MySQL) — جداول کلیدی و فیلدها
+
+(فهرست جداول پایه با نوع فیلدها برای migration)
+
+1. `users`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `email` VARCHAR(255) NULL UNIQUE
+   * `phone` VARCHAR(50) NULL UNIQUE
+   * `password` VARCHAR(255)
+   * `role` ENUM('owner','roommate') DEFAULT 'roommate'
+   * `gender` ENUM('male','female') NULL
+   * `first_login` TINYINT(1) DEFAULT 1
+   * `is_active` TINYINT(1) DEFAULT 1
+   * `created_at`, `updated_at`
+
+2. `profiles`
+
+   * `user_id` BIGINT PK FK->users.id
+   * `age` INT
+   * `job` VARCHAR(255)
+   * `city` VARCHAR(255)
+   * `budget_min` INT
+   * `budget_max` INT
+   * `smoker` TINYINT(1)
+   * `pets` TINYINT(1)
+   * `sleep_time_start` TIME
+   * `sleep_time_end` TIME
+   * `cleanliness` TINYINT(1)
+   * `completed` TINYINT(1) DEFAULT 0
+
+3. `personality_scores`
+
+   * `user_id` BIGINT PK
+   * `openness` FLOAT
+   * `conscientiousness` FLOAT
+   * `extraversion` FLOAT
+   * `agreeableness` FLOAT
+   * `neuroticism` FLOAT
+   * `created_at`
+
+4. `listings`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `owner_id` BIGINT FK->users.id
+   * `title` VARCHAR(255)
+   * `description` TEXT
+   * `price` INT
+   * `city` VARCHAR(255)
+   * `address` TEXT
+   * `room_count` INT
+   * `available_from` DATE
+   * `gender_allowed` ENUM('male','female','any') DEFAULT 'any'
+   * `rules` JSON
+   * `images` JSON
+   * `status` ENUM('active','archived','deleted') DEFAULT 'active'
+   * `created_at`, `updated_at`
+
+5. `matches`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `listing_id` BIGINT FK->listings.id
+   * `owner_id` BIGINT FK->users.id
+   * `requester_id` BIGINT FK->users.id
+   * `status` ENUM('pending','accepted','rejected','cancelled') DEFAULT 'pending'
+   * `match_percentage` TINYINT
+   * `created_at`, `updated_at`
+
+6. `rooms`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `match_id` BIGINT FK->matches.id
+   * `participants` JSON
+   * `created_at`
+
+7. `messages`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `room_id` BIGINT FK->rooms.id
+   * `from_id` BIGINT FK->users.id
+   * `to_id` BIGINT FK->users.id
+   * `content` TEXT
+   * `created_at` TIMESTAMP
+   * `read_at` TIMESTAMP NULL
+
+8. `tokens_blacklist`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `token` VARCHAR(512)
+   * `user_id` BIGINT
+   * `expires_at` TIMESTAMP
+
+9. `analytics_events`
+
+   * `id` BIGINT PK AUTO_INCREMENT
+   * `user_id` BIGINT NULL
+   * `event` VARCHAR(255)
+   * `payload` JSON
+   * `created_at`
+
+---
+
+### 6) API Routes (summary ready for Laravel routes/api.php)
+
+Group prefix: `/api/v1`
+
+Auth:
+
+* POST `/auth/signup`
+* POST `/auth/login`
+* POST `/auth/send-otp`
+* POST `/auth/verify-otp`
+* POST `/auth/logout`
+
+User/Profile:
+
+* GET `/user/me`
+* PATCH `/user/role`
+* PATCH `/profile`
+
+Personality:
+
+* POST `/personality/test`
+* GET `/personality/me`
+
+Listings:
+
+* POST `/listings` (owner)
+* GET `/listings/{id}`
+* GET `/listings/search`
+* PATCH `/listings/{id}/status`
+
+Matching:
+
+* GET `/match/recommendations`
+* POST `/match/send`
+* POST `/match/{id}/accept`
+* POST `/match/{id}/reject`
+
+Chat:
+
+* GET `/chat/room/{id}`
+* POST `/chat/room/{id}/send`
+
+Analytics:
+
+* POST `/analytics/event`
+
+Admin:
+
+* GET `/admin/users`
+* POST `/admin/suspend/{userId}`
+
+---
+
+### 7) Acceptance Rules خلاصه برای Cursor
+
+* Cursor **باید** تغییرات را در یک branch جدید اعمال کند و PR باز کند. هیچ تبدیلی روی شاخهٔ `main` بدون PR انجام نشود.
+* Cursor نباید secret یا credential را در repo قرار دهد.
+* هر migration جدید باید یک migration file جدید اضافه کند و در PR توضیح migration قید شود.
+* اگر Cursor دسترسی SSH برای deploy دارد، باید بعد از merge با `composer install` و `php artisan migrate --force` و `php artisan config:cache` عمل کند؛ در غیر این صورت فقط PR ایجاد کند.
+
+---
+
+**پایان PART A.**
+
+فایل بعدی (PART B) شامل: جزئیات کلاس‌ها و اینترفیس‌های PHP/Laravel، امضاء متدها، pseudo-code کامل، الگوریتم Matching با مثال عددی، WebSocket vs Polling پیاده‌سازی، نمونه migration و seeders، GitHub Actions pipeline نمونه برای deploy خودکار و checklist امنیتی برای Cursor خواهد بود (و نیز قوانین دقیق عدم اقدام خودسرانه Cursor).
+
+# Rule — PART B
+
+## پروژه: هم‌اتاقی — Rule کامل (PART B)
+
+**هدف PART B:** ارائهٔ تمام مشخصات فنی دقیق برای توسعه‌دهنده و برای Cursor: اینترفیس‌ها، کلاس‌ها، امضا متدها (method signatures) به سبک PHP/Laravel، pseudo-code، نمونه migration snippets، جزئیات الگوریتم Matching با فرمول و مثال عددی، پیاده‌سازی Chat (WebSocket vs Polling)، Queue/Jobs، GitHub Actions pipeline و قوانین دقیق Cursor (Checklist و رفتار مجاز/غیرمجاز).
+
+---
+
+### 8) Naming Conventions و PSR
+
+* کد باید مطابق PSR-12 باشد.
+* Namespace پایه: `App\`.
+* Eloquent Models در `App\Models\`.
+* Repositories در `App\Repositories\`.
+* Services در `App\Services\`.
+* Controllers در `App\Http\Controllers\Api\V1\`.
+
+---
+
+### 9) اینترفیس‌ها و کلاس‌ها (PHP/Laravel signatures)
+
+> همهٔ مثال‌ها به صورت PHP pseudocode با type-hints و docblocks نوشته شده‌اند.
+
+#### 9.1 Auth
+
+```php
+namespace App\Services;
+
+interface IAuthService
+{
+    /**
+     * @param array $data ['email'|'phone','password']
+     * @return array ['user' => User, 'access_token' => string, 'refresh_token' => string, 'first_login' => bool]
+     */
+    public function signup(array $data): array;
+
+    public function login(string $emailOrPhone, string $password): array;
+
+    public function sendOtp(string $emailOrPhone): bool;
+
+    public function verifyOtp(string $reference, string $code): array; // returns tokens
+
+    public function logout(int $userId, string $token): bool;
+}
+```
+
+**پیاده‌سازی نمونه:** `App\Services\AuthService` که از `IAuthService` پیروی می‌کند و از `Laravel\Sanctum` یا `tymon/jwt-auth` برای token استفاده می‌کند.
+
+#### 9.2 UserRepository (Eloquent)
+
+```php
+namespace App\Repositories;
+
+interface IUserRepository
+{
+    public function findById(int $id): ?\App\Models\User;
+    public function findByEmail(string $email): ?\App\Models\User;
+    public function findByPhone(string $phone): ?\App\Models\User;
+    public function create(array $data): \App\Models\User;
+    public function update(int $id, array $data): \App\Models\User;
+}
+```
+
+پیاده‌سازی concrete: `App\Repositories\Eloquent\UserRepository` که از Eloquent models استفاده می‌کند.
+
+#### 9.3 ProfileService
+
+```php
+interface IProfileService
+{
+    public function getProfile(int $userId): ?array; // returns profile DTO
+    public function updateProfile(int $userId, array $payload): array;
+    public function completeProfile(int $userId, array $payload): array; // sets completed=true
+}
+```
+
+#### 9.4 PersonalityService
+
+```php
+interface IPersonalityService
+{
+    public function submitTest(int $userId, array $answers): array; // returns PersonalityScore
+    public function getScore(int $userId): ?array;
+    public function similarity(array $a, array $b): float; // 0-100
+}
+```
+
+#### 9.5 ListingRepository & ListingService
+
+```php
+interface IListingRepository
+{
+    public function create(array $data): \App\Models\Listing;
+    public function update(int $id, array $data): \App\Models\Listing;
+    public function findById(int $id): ?\App\Models\Listing;
+    public function search(array $filters, int $limit = 20, int $offset = 0): array; // paginated
+}
+
+interface IListingService
+{
+    public function createListing(int $ownerId, array $payload): array;
+    public function searchListings(array $filters): array;
+}
+```
+
+#### 9.6 MatchingService
+
+```php
+interface IMatchingService
+{
+    public function getRecommendations(int $userId, array $options = []): array;
+    public function sendRequest(int $fromUserId, int $listingId, ?string $message = null): array; // Match DTO
+    public function accept(int $matchId, int $actorId): array;
+    public function reject(int $matchId, int $actorId, ?string $reason = null): bool;
+    public function computeMatchScore(array $requesterProfile, array $ownerProfile, array $listing): int; // 0-100
+}
+```
+
+---
+
+### 10) Matching Algorithm — دقیق با مثال عددی
+
+**فرمول نهایی:**
+
+```
+match = round(0.4 * personality_score + 0.3 * lifestyle_score + 0.2 * budget_score + 0.1 * location_score)
+```
+
+**زیر-محاسبه‌ها:**
+
+* `personality_score` : similarity بین دو وکتور 5-بعدی (openness, conscientiousness, extraversion, agreeableness, neuroticism)
+
+  * استفاده از Cosine similarity یا normalized Euclidean distance.
+  * پیاده‌سازی پیشنهادی: normalize each trait to 0-1, compute cosine similarity, multiply by 100.
+
+* `lifestyle_score` : موارد boolean و numeric مثل smoker/pets/cleanliness/sleep_time
+
+  * روش: assign weights به هر فیلد و محاسبه weighted match. مثال: smoker exact match => +25, pets exact match => +25, cleanliness difference mapped to 0-50.
+
+* `budget_score` : اگر قیمت listing داخل بازهٔ requester => 100، اگر خارج => نسبت انطباق به صورت درصد (مثلاً اگر listing.price = 1100 و budget_max = 1000 => budget_score = max(0, 100 - (price - budget_max) / budget_max * 100)).
+
+* `location_score` : city exact match => 100، nearby => 50، otherwise 0. (قابلیت گسترش با geo distance later)
+
+**مثال عددی:**
+
+* personality_score = 80
+* lifestyle_score = 70
+* budget_score = 90
+* location_score = 100
+
+match = round(0.4*80 + 0.3*70 + 0.2*90 + 0.1*100) = round(32 + 21 + 18 + 10) = round(81) => 81%
+
+---
+
+### 11) Chat: WebSocket vs Polling (Laravel specifics)
+
+**Primary:** Laravel Echo + Pusher (hosted) یا socket.io server اگر دسترس باشد.
+**Fallback (shared hosting):** Polling endpoint.
+
+**Polling Endpoint contract:**
+
+* GET `/api/v1/chat/room/{id}?since={timestamp}` -> returns messages after timestamp.
+* POST `/api/v1/chat/room/{id}/send` { content }
+
+**WebSocket flow:**
+
+* When message sent -> broadcast event `MessageSent` -> clients subscribed to `room.{roomId}` receive it.
+* Server writes message to DB and broadcasts.
+
+**Rate limiting:**
+
+* send message: max 10 messages/min (per user)
+
+---
+
+### 12) Queue, Jobs, Events
+
+**Jobs:**
+
+* `SendNotificationJob` (notify upon match created/accepted)
+* `RecomputeRecommendationsJob` (recompute for user or listing)
+
+**Events:**
+
+* `UserRegistered`, `ProfileCompleted`, `ListingCreated`, `MatchCreated`, `MatchAccepted`, `MessageSent`.
+
+Jobs should be queued via Laravel Queues. If no queue worker on host, use `database` driver and schedule `php artisan queue:work` in cron or instruct user to run worker.
+
+---
+
+### 13) Sample Migration Snippets (Laravel)
+
+**users migration (simplified):**
+
+```php
+Schema::create('users', function (Blueprint $table) {
+    $table->bigIncrements('id');
+    $table->string('email')->nullable()->unique();
+    $table->string('phone')->nullable()->unique();
+    $table->string('password');
+    $table->enum('role',['owner','roommate'])->default('roommate');
+    $table->enum('gender',['male','female'])->nullable();
+    $table->boolean('first_login')->default(true);
+    $table->boolean('is_active')->default(true);
+    $table->timestamps();
+});
+```
+
+**listings migration (simplified):**
+
+```php
+Schema::create('listings', function (Blueprint $table) {
+    $table->bigIncrements('id');
+    $table->unsignedBigInteger('owner_id');
+    $table->string('title');
+    $table->text('description')->nullable();
+    $table->integer('price');
+    $table->string('city');
+    $table->text('address')->nullable();
+    $table->integer('room_count')->default(1);
+    $table->date('available_from')->nullable();
+    $table->enum('gender_allowed', ['male','female','any'])->default('any');
+    $table->json('rules')->nullable();
+    $table->json('images')->nullable();
+    $table->enum('status',['active','archived','deleted'])->default('active');
+    $table->timestamps();
+
+    $table->foreign('owner_id')->references('id')->on('users')->onDelete('cascade');
+});
+```
+
+---
+
+### 14) GitHub Integration & Deploy Pipeline (Cursor behavior)
+
+**Cursor MUST follow this flow:**
+
+1. Pull latest `main`.
+2. Create branch: `cursor/<short-desc>-<date>`.
+3. Apply code changes *only* under `public_html/` directory or other agreed dirs.
+4. Run static checks (phpcs, phpstan) locally (within action or CI) and unit tests.
+5. Commit with message describing changes and referencing ticket/issue.
+6. Push branch and open Pull Request with description, list of files changed, migration steps, and any manual steps.
+7. Wait for user approval. If repo configured for auto-merge and user allowed, merge.
+8. After merge: trigger GitHub Actions:
+
+   * Steps: `composer install --no-dev --optimize-autoloader`, `php artisan migrate --force`, `php artisan config:cache`, `php artisan route:cache`, `php artisan storage:link`.
+   * If direct SSH deploy allowed: execute `git pull` on server and run post-deploy commands.
+
+**Security:** Cursor never stores secrets in repo. Use GitHub Secrets and environment variables.
+
+---
+
+### 15) Security & Auth specifics
+
+* Password hashing: `bcrypt` or `Argon2` via Laravel's `Hash::make`.
+* Access token: Laravel Sanctum or JWT; refresh token stored hashed in DB.
+* Rate limiting: apply `throttle` middleware on auth and chat send endpoints.
+* Input validation: use FormRequest classes with rules.
+* File upload validation: mime types, max size, virus scanning if possible.
+
+---
+
+### 16) Testing & QA
+
+* Unit tests for MatchingService, PersonalityCalculator, AuthService.
+* Integration tests for API endpoints using Laravel's HTTP testing.
+* E2E tests with Cypress or Playwright (if available).
+* Provide sample seeders and faker data to run tests locally.
+
+---
+
+### 17) Cursor Rules — Permitted vs Forbidden Actions
+
+**Permitted:**
+
+* Modify files inside repo, create branches, open PRs, run tests and linters.
+* Add migrations, controllers, services, tests.
+* Update README with deployment instructions.
+
+**Forbidden (must NEVER do):**
+
+* Push directly to `main` without PR and user approval (unless explicit auto-merge enabled).
+* Add hard-coded secrets or credentials.
+* Remove or alter user data without explicit instruction.
+* Execute destructive DB actions on production without migration file and backup.
+
+---
+
+### 18) Acceptance Criteria (concrete checks)
+
+* All API endpoints listed in Part A respond according to contract and pass validation.
+* First Login flow must prevent access to recommendations until profile.completed == true.
+* Matching must return results respecting gender_allowed rules.
+* Owner cannot accept a requester of opposite gender unless listing.gender_allowed == 'any'.
+* After match accepted, chat room created and messages exchangeable.
+* Migrations added in PR, and PR description contains `php artisan migrate --force` instruction for deploy.
+
+---
+
+## پایان PART B
+
+این دو فایل (PART A و PART B) باید کنار هم در repository یا doc مدیریت پروژه قرار گیرند. اکنون Cursor می‌تواند با خواندن این دو doc، تغییرات لازم را روی `public_html` پیشنهاد دهد (branch + PR). اگر می‌خواهی من این دو فایل را به OpenAPI, Laravel controller skeleton یا migration files واقعی تبدیل کنم و در repo قرار دهم، اعلام کن تا اتوماتیک بسازم و PR باز کنم (با رعایت همهٔ قوانین بالا).
+
+

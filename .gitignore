@@ -1,0 +1,32 @@
+# PHP
+*.log
+error_log
+*.tmp
+
+# Uploads (keep structure but ignore content)
+assets/uploads/avatars/*
+!assets/uploads/avatars/.gitkeep
+assets/uploads/houses/*
+!assets/uploads/houses/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temporary files
+*.bak
+*.backup
+*~
+
+# Environment
+.env
+.env.local
+
