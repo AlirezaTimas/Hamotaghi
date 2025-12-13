@@ -30,3 +30,10 @@ desktop.ini
 .env
 .env.local
 
+# Temporary documentation/guide files (auto-generated)
+*_STATUS.md
+*_SUCCESS.md
+*_GUIDE.md
+*_STEPS*.md
+*_RESTORED.md
+
